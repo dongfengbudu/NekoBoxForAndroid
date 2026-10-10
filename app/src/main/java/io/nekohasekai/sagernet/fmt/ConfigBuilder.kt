@@ -6,6 +6,7 @@ import io.nekohasekai.sagernet.bg.VpnService
 import io.nekohasekai.sagernet.database.DataStore
 import io.nekohasekai.sagernet.database.ProxyEntity
 import io.nekohasekai.sagernet.database.ProxyEntity.Companion.TYPE_CONFIG
+import io.nekohasekai.sagernet.database.ProxyGroup
 import io.nekohasekai.sagernet.database.SagerDatabase
 import io.nekohasekai.sagernet.fmt.ConfigBuildResult.IndexEntity
 import io.nekohasekai.sagernet.fmt.hysteria.HysteriaBean
@@ -52,6 +53,7 @@ const val TAG_DIRECT = "direct"
 const val TAG_BYPASS = "bypass"
 const val TAG_BLOCK = "block"
 const val TAG_FRAGMENT = "fragment"
+const val TAG_DNS_HOSTS = "dns-hosts"
 
 const val LOCALHOST = "127.0.0.1"
 
@@ -64,6 +66,38 @@ class ConfigBuildResult(
     val selectorGroupId: Long,
 ) {
     data class IndexEntity(var chain: LinkedHashMap<Int, ProxyEntity>)
+}
+
+private fun sanitizeDnsEntry(value: String): String {
+    return value.filterNot { it.isISOControl() }.trim()
+}
+
+private fun parseDnsHosts(value: String): Map<String, List<String>> {
+    val hosts = linkedMapOf<String, MutableList<String>>()
+    value.lineSequence().forEach { line ->
+        val trimmed = line.trim()
+        if (trimmed.isEmpty() || trimmed.startsWith("#")) return@forEach
+        val tokens = trimmed.split("\\s+".toRegex())
+        if (tokens.size < 2) return@forEach
+        val domain = tokens.first()
+        val addresses = tokens.drop(1).filter { it.isIpAddress() }
+        if (addresses.isEmpty()) return@forEach
+        hosts.getOrPut(domain) { mutableListOf() }.addAll(addresses)
+    }
+    return hosts.mapValues { (_, addresses) -> addresses.distinct() }
+}
+
+private fun serverHostOf(bean: AbstractBean): String? {
+    val fallback = bean.serverAddress?.takeIf { it.isNotBlank() }
+    if (bean is ConfigBean) {
+        return try {
+            val map = gson.fromJson(bean.config, mutableMapOf<String, Any>().javaClass)
+            map["server"]?.toString()?.takeIf { it.isNotBlank() } ?: fallback
+        } catch (_: Exception) {
+            fallback
+        }
+    }
+    return fallback
 }
 
 fun buildConfig(
@@ -139,12 +173,19 @@ fun buildConfig(
     val userDNSRuleList = mutableListOf<DNSRule_DefaultOptions>()
     val domainListDNSDirectForce = mutableListOf<String>()
     val bypassDNSBeans = hashSetOf<AbstractBean>()
+    val perGroupResolver = HashMap<Long, String>()
+    val perGroupServerHosts = HashMap<Long, MutableSet<String>>()
+    val hostResolvers = HashMap<String, MutableSet<String>>()
+    val nonCustomFinalHosts = hashSetOf<String>()
+    val groupCache = HashMap<Long, ProxyGroup?>()
     val isVPN = DataStore.serviceMode == Key.MODE_VPN
+    val deviceInboundTag = if (isVPN && DataStore.enableHevTun) TAG_MIXED else "tun-in"
     val bind = if (!forTest && DataStore.allowAccess) "0.0.0.0" else LOCALHOST
     val remoteDns = DataStore.remoteDns.split("\n")
         .mapNotNull { dns -> dns.trim().takeIf { it.isNotBlank() && !it.startsWith("#") } }
     val directDNS = DataStore.directDns.split("\n")
         .mapNotNull { dns -> dns.trim().takeIf { it.isNotBlank() && !it.startsWith("#") } }
+    val dnsHosts by lazy { parseDnsHosts(DataStore.dnsHosts) }
     val enableDnsRouting = DataStore.enableDnsRouting
     val useFakeDns = DataStore.enableFakeDns && !forTest
     val needSniff = DataStore.trafficSniffing > 0
@@ -215,7 +256,7 @@ fun buildConfig(
         inbounds = mutableListOf()
 
         if (!forTest) {
-            if (isVPN) inbounds.add(Inbound_TunOptions().apply {
+            if (isVPN && !DataStore.enableHevTun) inbounds.add(Inbound_TunOptions().apply {
                 type = "tun"
                 tag = "tun-in"
                 interface_name = "tun0"
@@ -254,6 +295,12 @@ fun buildConfig(
                 domain_strategy = genDomainStrategy(DataStore.resolveDestination)
                 sniff = needSniff
                 sniff_override_destination = needSniffOverride
+                if (DataStore.mixedInboundHasAuth) {
+                    users = listOf(User().also { u ->
+                        u.username = DataStore.mixedUsername
+                        u.password = DataStore.mixedSecret
+                    })
+                }
             })
         }
 
@@ -313,6 +360,41 @@ fun buildConfig(
                     needGlobal = true
                     tagOut = "g-" + proxyEntity.id
                     bypassDNSBeans += proxyEntity.requireBean()
+
+                    if (!forTest) {
+                        val ownerGid = entity.groupId
+                        val ownerGroup = groupCache.getOrPut(ownerGid) {
+                            SagerDatabase.groupDao.getById(ownerGid)
+                        }
+                        val resolver = ownerGroup
+                            ?.takeIf { it.type == GroupType.SUBSCRIPTION }
+                            ?.subscription?.serverDnsResolver
+                            ?.let { sanitizeDnsEntry(it) }
+                            ?.takeIf { it.isNotBlank() }
+
+                        if (resolver != null) {
+                            profileList.forEach { hop ->
+                                val host = serverHostOf(hop.requireBean())
+                                if (host != null && !host.isIpAddress()) {
+                                    if (hop.groupId == ownerGid) {
+                                        perGroupResolver[ownerGid] = resolver
+                                        perGroupServerHosts.getOrPut(ownerGid) { mutableSetOf() }
+                                            .add(host)
+                                        hostResolvers.getOrPut(host) { mutableSetOf() }.add(resolver)
+                                    } else {
+                                        nonCustomFinalHosts.add(host)
+                                    }
+                                }
+                            }
+                        } else {
+                            profileList.forEach { hop ->
+                                val host = serverHostOf(hop.requireBean())
+                                if (host != null && !host.isIpAddress()) {
+                                    nonCustomFinalHosts.add(host)
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if (index == 0) {
@@ -551,7 +633,7 @@ fun buildConfig(
             }
 
             route.rules.add(Rule_DefaultOptions().apply {
-                inbound = listOf("tun-in")
+                inbound = listOf(deviceInboundTag)
                 outbound = mainProxyTag
             })
 
@@ -653,10 +735,28 @@ fun buildConfig(
                         }
                     }
 
-		    when (rule.outbound) {
+                    val hasDomainCriteria = !domainList.isNullOrEmpty()
+                    val hasIpCriteria =
+                        rule.ip.isNotBlank() || rulesetTags.any { it.second }
+                    val hasDomainRuleset = rulesetTags.any { !it.second }
+                    val isAppOnlyDns =
+                        uidList.isNotEmpty() &&
+                            !hasDomainCriteria &&
+                            !hasIpCriteria &&
+                            !hasDomainRuleset &&
+                            rule.port.isBlank() &&
+                            rule.sourcePort.isBlank() &&
+                            rule.network.isBlank() &&
+                            rule.source.isBlank() &&
+                            rule.protocol.isBlank()
+                    val shouldAddDnsRule = hasDomainCriteria || isAppOnlyDns
+
+                    when (rule.outbound) {
                         -1L -> {
-                            userDNSRuleList += makeDnsRuleObj().apply { server = "dns-direct" }
-                            
+                            if (shouldAddDnsRule) {
+                                userDNSRuleList += makeDnsRuleObj().apply { server = "dns-direct" }
+                            }
+
                             if (rule_set != null && rulesetTags.isNotEmpty()) {
                                 for (tag in rule_set) {
                                     // 只处理ruleset标签，且必须是非IP类型
@@ -672,16 +772,18 @@ fun buildConfig(
                         }
 
                         0L -> {
-                            if (useFakeDns) userDNSRuleList += makeDnsRuleObj().apply {
-                                server = "dns-fake"
-                                inbound = listOf("tun-in")
-                                query_type = listOf("A", "AAAA")
-                            } else {
-                                userDNSRuleList += makeDnsRuleObj().apply {
-                                    server = "dns-remote"
+                            if (shouldAddDnsRule) {
+                                if (useFakeDns) userDNSRuleList += makeDnsRuleObj().apply {
+                                    server = "dns-fake"
+                                    inbound = listOf(deviceInboundTag)
+                                    query_type = listOf("A", "AAAA")
+                                } else {
+                                    userDNSRuleList += makeDnsRuleObj().apply {
+                                        server = "dns-remote"
+                                    }
                                 }
                             }
-                            
+
                             if (rule_set != null && rulesetTags.isNotEmpty()) {
                                 for (tag in rule_set) {
                                     val tagInfo = rulesetTags.find { it.first == tag }
@@ -690,7 +792,7 @@ fun buildConfig(
                                             userDNSRuleList += DNSRule_DefaultOptions().apply {
                                                 rule_set = mutableListOf(tag)
                                                 server = "dns-fake"
-                                                inbound = listOf("tun-in")
+                                                inbound = listOf(deviceInboundTag)
                                                 query_type = listOf("A", "AAAA")
                                             }
                                         } else {
@@ -705,11 +807,13 @@ fun buildConfig(
                         }
 
                         -2L -> {
-                            userDNSRuleList += makeDnsRuleObj().apply {
-                                server = "dns-block"
-                                disable_cache = true
+                            if (shouldAddDnsRule) {
+                                userDNSRuleList += makeDnsRuleObj().apply {
+                                    server = "dns-block"
+                                    disable_cache = true
+                                }
                             }
-                            
+
                             if (rule_set != null && rulesetTags.isNotEmpty()) {
                                 for (tag in rule_set) {
                                     val tagInfo = rulesetTags.find { it.first == tag }
@@ -777,6 +881,10 @@ fun buildConfig(
             outbounds.add(fragmentOutbound)
         }
 
+        fun isExclusiveCustomHost(host: String): Boolean {
+            return hostResolvers[host]?.size == 1 && !nonCustomFinalHosts.contains(host)
+        }
+
         // Bypass Lookup for the first profile
         bypassDNSBeans.forEach {
             var serverAddr = it.serverAddress
@@ -790,7 +898,9 @@ fun buildConfig(
             }
 
             if (!serverAddr.isIpAddress()) {
-                domainListDNSDirectForce.add("full:${serverAddr}")
+                if (!isExclusiveCustomHost(serverAddr)) {
+                    domainListDNSDirectForce.add("full:${serverAddr}")
+                }
             }
         }
 
@@ -834,6 +944,13 @@ fun buildConfig(
                 tag = "dns-remote"
                 address_resolver = "dns-direct"
                 strategy = autoDnsDomainStrategy(SingBoxOptionsUtil.domainStrategy(tag))
+            })
+        }
+        if (dnsHosts.isNotEmpty()) {
+            dns.servers.add(DNSServerOptions().apply {
+                tag = TAG_DNS_HOSTS
+                _hack_config_map["type"] = "hosts"
+                _hack_config_map["predefined"] = dnsHosts
             })
         }
 
@@ -883,10 +1000,16 @@ fun buildConfig(
                     strategy = "ipv4_only"
                 })
                 dns.rules.add(DNSRule_DefaultOptions().apply {
-                    inbound = listOf("tun-in")
+                    inbound = listOf(deviceInboundTag)
                     server = "dns-fake"
                     disable_cache = true
                     query_type = listOf("A", "AAAA")
+                })
+            }
+            if (dnsHosts.isNotEmpty()) {
+                dns.rules.add(0, DNSRule_DefaultOptions().apply {
+                    server = TAG_DNS_HOSTS
+                    _hack_config_map["ip_accept_any"] = true
                 })
             }
             // avoid loopback
@@ -899,6 +1022,27 @@ fun buildConfig(
                 dns.rules.add(0, DNSRule_DefaultOptions().apply {
                     makeSingBoxRule(domainListDNSDirectForce.toHashSet().toList())
                     server = "dns-direct"
+                })
+            }
+            perGroupResolver.forEach { (gid, resolver) ->
+                val hosts = perGroupServerHosts[gid]
+                    ?.filter { it.isNotBlank() && isExclusiveCustomHost(it) }
+                    ?.map { "full:$it" }
+                if (hosts.isNullOrEmpty()) return@forEach
+
+                val serverTag = "dns-sub-$gid"
+                dns.servers.add(DNSServerOptions().apply {
+                    address = resolver
+                    tag = serverTag
+                    detour = TAG_DIRECT
+                    if (!resolver.isIpAddress()) {
+                        address_resolver = "dns-direct"
+                    }
+                    strategy = autoDnsDomainStrategy(SingBoxOptionsUtil.domainStrategy("server"))
+                })
+                dns.rules.add(0, DNSRule_DefaultOptions().apply {
+                    makeSingBoxRule(hosts)
+                    server = serverTag
                 })
             }
         }

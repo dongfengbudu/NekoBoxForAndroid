@@ -3,6 +3,7 @@
 [![API](https://img.shields.io/badge/API-21%2B-brightgreen.svg?style=flat)](https://android-arsenal.com/api?level=21)
 [![Releases](https://img.shields.io/github/v/release/MatsuriDayo/NekoBoxForAndroid)](https://github.com/MatsuriDayo/NekoBoxForAndroid/releases)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-orange.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Contributors](https://img.shields.io/github/contributors/starifly/NekoBoxForAndroid)](https://github.com/starifly/NekoBoxForAndroid/graphs/contributors)
 
 ## 免责声明
 
@@ -40,7 +41,7 @@ https://matsuridayo.github.io
 * Trojan
 * VLESS
 * AnyTLS/AnyReality
-* Snell 1/2/3/4/5
+* Snell 1/2/3/4/5/6
 * ShadowTLS
 * TUIC
 * Juicity
@@ -75,11 +76,15 @@ https://matsuridayo.github.io
     "uplink_http_method": "",
     "session_placement": "",
     "session_key": "",
+    "session_id_table": "",  // hex/base36/base62/alphabet etc, ""=UUID
+    "session_id_length": 0,
     "seq_placement": "",
     "seq_key": "",
     "uplink_data_placement": "",
     "uplink_data_key": "",
     "uplink_chunk_size": 0,
+    "congestion_controller": "",  // H3 only: ""=bbr, bbr/cubic/reno
+    "cwnd": 0,  // H3 only, default 32
 	"download": {
 		"mode": "auto",
 		"host": "b.yourdomain.com",
@@ -104,11 +109,15 @@ https://matsuridayo.github.io
         "uplink_http_method": "",
         "session_placement": "",
         "session_key": "",
+        "session_id_table": "",  // hex/base36/base62/alphabet etc, ""=UUID
+        "session_id_length": 0,
         "seq_placement": "",
         "seq_key": "",
         "uplink_data_placement": "",
         "uplink_data_key": "",
         "uplink_chunk_size": 0,
+        "congestion_controller": "",  // H3 only: ""=bbr, bbr/cubic/reno
+        "cwnd": 0,  // H3 only, default 32
 		"server": "$(ip_or_domain_of_your_cdn)",
 		"server_port": 443,
 		"tls": {
@@ -150,11 +159,15 @@ https://matsuridayo.github.io
     "uplink_http_method": "",
     "session_placement": "",
     "session_key": "",
+    "session_id_table": "",  // hex/base36/base62/alphabet etc, ""=UUID
+    "session_id_length": 0,
     "seq_placement": "",
     "seq_key": "",
     "uplink_data_placement": "",
     "uplink_data_key": "",
     "uplink_chunk_size": 0,
+    "congestion_controller": "",  // H3 only: ""=bbr, bbr/cubic/reno
+    "cwnd": 0,  // H3 only, default 32
 	"download": {
 		"mode": "auto",
 		"host": "example.com",
@@ -179,11 +192,15 @@ https://matsuridayo.github.io
         "uplink_http_method": "",
         "session_placement": "",
         "session_key": "",
+        "session_id_table": "",  // 可选: hex/base36/base62/alphabet 等, 留空则用 UUID
+        "session_id_length": 0,
         "seq_placement": "",
         "seq_key": "",
         "uplink_data_placement": "",
         "uplink_data_key": "",
         "uplink_chunk_size": 0,
+        "congestion_controller": "",  // H3 only: ""=bbr, bbr/cubic/reno
+        "cwnd": 0,  // H3 only, default 32
 		"server": "$(ip_or_domain_of_your_cdn)",
 		"server_port": 443,
 		"tls": {
@@ -254,3 +271,7 @@ Android GUI:
 Web Dashboard:
 
 - [Yacd-meta](https://github.com/MetaCubeX/Yacd-meta)
+
+## Contributors
+
+![Contributors](https://contrib.rocks/image?repo=starifly/NekoBoxForAndroid)

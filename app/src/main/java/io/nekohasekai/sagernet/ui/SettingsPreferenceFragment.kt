@@ -15,11 +15,14 @@ import io.nekohasekai.sagernet.SagerNet
 import io.nekohasekai.sagernet.database.DataStore
 import io.nekohasekai.sagernet.database.preference.EditTextPreferenceModifiers
 import io.nekohasekai.sagernet.ktx.*
+import io.nekohasekai.sagernet.utils.AppLocale
 import io.nekohasekai.sagernet.utils.Theme
 import moe.matsuri.nb4a.ui.*
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
+import androidx.appcompat.widget.SwitchCompat
+import com.google.android.material.textfield.TextInputEditText
 import java.io.File
 
 class SettingsPreferenceFragment : PreferenceFragmentCompat() {
@@ -65,10 +68,16 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
             Theme.applyNightTheme()
             true
         }
-        val mixedPort = findPreference<EditTextPreference>(Key.MIXED_PORT)!!
+        val appLanguage = findPreference<SimpleMenuPreference>(Key.APP_LANGUAGE)!!
+        appLanguage.setOnPreferenceChangeListener { _, newValue ->
+            AppLocale.apply(newValue as String)
+            true
+        }
+        val localProxySettings = findPreference<Preference>("localProxySettings")!!
         val serviceMode = findPreference<Preference>(Key.SERVICE_MODE)!!
-        val allowAccess = findPreference<Preference>(Key.ALLOW_ACCESS)!!
         val appendHttpProxy = findPreference<SwitchPreference>(Key.APPEND_HTTP_PROXY)!!
+        val httpProxyBypass = findPreference<EditTextPreference>(Key.HTTP_PROXY_BYPASS)!!
+        val dnsHosts = findPreference<EditTextPreference>(Key.DNS_HOSTS)!!
         val strictRoute = findPreference<SwitchPreference>(Key.STRICT_ROUTE)!!
 
         val showDirectSpeed = findPreference<SwitchPreference>(Key.SHOW_DIRECT_SPEED)!!
@@ -117,7 +126,10 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
             true
         }
 
-        mixedPort.setOnBindEditTextListener(EditTextPreferenceModifiers.Port)
+        httpProxyBypass.setOnBindEditTextListener(EditTextPreferenceModifiers.Hosts)
+        dnsHosts.setOnBindEditTextListener(EditTextPreferenceModifiers.Hosts)
+        httpProxyBypass.summaryProvider = ListSummaryProvider(maxLines = 1)
+        dnsHosts.summaryProvider = ListSummaryProvider(maxLines = 1)
 
         val metedNetwork = findPreference<Preference>(Key.METERED_NETWORK)!!
         if (Build.VERSION.SDK_INT < 28) {
@@ -146,6 +158,13 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
         }
 
         val tunImplementation = findPreference<SimpleMenuPreference>(Key.TUN_IMPLEMENTATION)!!
+        val enableHevTun = findPreference<SwitchPreference>(Key.ENABLE_HEV_TUN)!!
+        tunImplementation.isEnabled = !DataStore.enableHevTun
+        enableHevTun.setOnPreferenceChangeListener { _, newValue ->
+            tunImplementation.isEnabled = !(newValue as Boolean)
+            needReload()
+            true
+        }
         val resolveDestination = findPreference<SwitchPreference>(Key.RESOLVE_DESTINATION)!!
         val acquireWakeLock = findPreference<SwitchPreference>(Key.ACQUIRE_WAKE_LOCK)!!
         val hideFromRecentApps = findPreference<SwitchPreference>(Key.HIDE_FROM_RECENT_APPS)!!
@@ -168,8 +187,30 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
             true
         }
 
-        mixedPort.onPreferenceChangeListener = reloadListener
-        appendHttpProxy.onPreferenceChangeListener = reloadListener
+        localProxySettings.summary = localProxySummary()
+        localProxySettings.setOnPreferenceClickListener {
+            showLocalProxySettingsDialog(localProxySettings)
+            true
+        }
+        appendHttpProxy.setOnPreferenceChangeListener { _, newValue ->
+            if (newValue as Boolean) {
+                MaterialAlertDialogBuilder(requireContext()).apply {
+                    setTitle(R.string.append_http_proxy_security_title)
+                    setMessage(R.string.append_http_proxy_security_message)
+                    setNegativeButton(android.R.string.cancel, null)
+                    setPositiveButton(R.string.enable_anyway) { _, _ ->
+                        appendHttpProxy.isChecked = true
+                        needReload()
+                    }
+                }.show()
+                false
+            } else {
+                needReload()
+                true
+            }
+        }
+        httpProxyBypass.onPreferenceChangeListener = reloadListener
+        dnsHosts.onPreferenceChangeListener = reloadListener
         strictRoute.onPreferenceChangeListener = reloadListener
         showDirectSpeed.onPreferenceChangeListener = reloadListener
         trafficSniffing.onPreferenceChangeListener = reloadListener
@@ -186,7 +227,6 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
         enableDnsRouting.onPreferenceChangeListener = reloadListener
 
         ipv6Mode.onPreferenceChangeListener = reloadListener
-        allowAccess.onPreferenceChangeListener = reloadListener
 
         resolveDestination.onPreferenceChangeListener = reloadListener
         tunImplementation.onPreferenceChangeListener = reloadListener
@@ -240,6 +280,47 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
         }
     }
 
+    private fun localProxySummary(): String {
+        val host = if (DataStore.allowAccess) "0.0.0.0" else "127.0.0.1"
+        return "$host:${DataStore.mixedPort}"
+    }
+
+    private fun showLocalProxySettingsDialog(preference: Preference) {
+        val view = layoutInflater.inflate(R.layout.layout_local_proxy_dialog, null)
+        val portField = view.findViewById<TextInputEditText>(R.id.proxyPort)
+        val allowAccessSwitch = view.findViewById<SwitchCompat>(R.id.allowAccessSwitch)
+        val usernameField = view.findViewById<TextInputEditText>(R.id.proxyUsername)
+        val passwordField = view.findViewById<TextInputEditText>(R.id.proxyPassword)
+
+        portField.setText(DataStore.mixedPort.toString())
+        allowAccessSwitch.isChecked = DataStore.allowAccess
+        usernameField.setText(DataStore.mixedUsername)
+        passwordField.setText(DataStore.mixedSecret)
+
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.local_proxy_settings)
+            .setView(view)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val port = portField.text.toString().toIntOrNull()
+                if (port == null || port !in 1..65535) {
+                    Toast.makeText(
+                        requireContext(), R.string.port_out_of_range, Toast.LENGTH_SHORT
+                    ).show()
+                    return@setPositiveButton
+                }
+                DataStore.mixedPort = port
+                DataStore.allowAccess = allowAccessSwitch.isChecked
+                DataStore.mixedUsername = usernameField.text.toString().trim()
+                DataStore.configurationStore.putString(
+                    Key.MIXED_SECRET, passwordField.text.toString()
+                )
+                preference.summary = localProxySummary()
+                needReload()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     private fun clearAppCache() {
         try {
             val cacheDir = SagerNet.application.cacheDir
@@ -261,7 +342,7 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
             e.printStackTrace()
         }
     }
-    
+
     private fun clearDirFiles(dir: File, skipFiles: Set<String> = emptySet()): Boolean {
         if (dir.isDirectory) {
             val children = dir.list() ?: return true
@@ -292,6 +373,27 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
             return true
         }
         return false
+    }
+
+    class ListSummaryProvider(
+        private val maxLines: Int,
+    ) : Preference.SummaryProvider<EditTextPreference> {
+
+        override fun provideSummary(preference: EditTextPreference): CharSequence {
+            val lines = preference.text.orEmpty()
+                .lineSequence()
+                .filter { it.isNotBlank() }
+                .toList()
+            if (lines.isEmpty()) {
+                return preference.context.getString(androidx.preference.R.string.not_set)
+            }
+            return if (lines.size > maxLines) {
+                lines.take(maxLines).joinToString("\n", postfix = "\n...")
+            } else {
+                lines.joinToString("\n")
+            }
+        }
+
     }
 
 }
